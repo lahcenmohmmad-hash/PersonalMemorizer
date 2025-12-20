@@ -1,5 +1,6 @@
 package com.example.personalmemorizer
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,183 +13,197 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
-import java.io.File
 
 class MemorizerService : Service(), AudioManager.OnAudioFocusChangeListener {
 
     private var mediaPlayer: MediaPlayer? = null
-    private var handler: Handler? = null
     private var audioFilePath: String? = null
-    private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var audioManager: AudioManager
+    private lateinit var alarmManager: AlarmManager
+    private var wakeLock: PowerManager.WakeLock? = null
     
-    // التوقيتات: 10 ثواني، دقيقة، 5 دقائق، ثم يثبت على 10 دقائق
-    private val intervals = listOf(10000L, 60000L, 300000L, 600000L) 
+    // التوقيتات: 10 ثواني، دقيقة، 5 دقائق، ثم كل 10 دقائق
+    private val intervals = listOf(10000L, 60000L, 300000L, 600000L)
     private var intervalIndex = 0
+
+    companion object {
+        const val ACTION_START = "ACTION_START"
+        const val ACTION_PLAY_NOW = "ACTION_PLAY_NOW"
+        const val ACTION_STOP = "ACTION_STOP"
+    }
 
     override fun onCreate() {
         super.onCreate()
-        try {
-            audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            
-            // قفل المعالج لمنع النوم، لكن نسمح للشاشة بالانطفاء
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:LoopLock")
-            wakeLock?.acquire(24 * 60 * 60 * 1000L)
-            
-            handler = Handler(Looper.getMainLooper())
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:CoreLock")
+        wakeLock?.setReferenceCounted(false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        try {
-            audioFilePath = intent?.getStringExtra("filePath")
-            startForegroundNotification()
-            
-            if (audioFilePath != null) {
-                intervalIndex = 0
-                // نبدأ العملية فوراً
-                playAudioSmart()
+        val action = intent?.action
+        
+        // التعامل مع الأوامر
+        when (action) {
+            ACTION_START -> {
+                audioFilePath = intent.getStringExtra("filePath")
+                if (audioFilePath != null) {
+                    intervalIndex = 0
+                    startForegroundServiceNotif()
+                    playAudioAggressive() // تشغيل فوري
+                }
             }
-        } catch (e: Exception) {
-           // في حال الخطأ لا نوقف الخدمة
+            ACTION_PLAY_NOW -> {
+                // استيقظ من المنبه!
+                // استعادة المسار من الذاكرة إذا كان مفقوداً
+                if (audioFilePath == null) {
+                   // محاولة البحث في الكاش عن آخر ملف
+                   val file = java.io.File(cacheDir, "memorizer_audio.mp3")
+                   if (file.exists()) audioFilePath = file.absolutePath
+                }
+                startForegroundServiceNotif()
+                playAudioAggressive()
+            }
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         return START_STICKY
     }
 
-    private fun startForegroundNotification() {
-        val channelId = "memorizer_service_channel"
+    private fun startForegroundServiceNotif() {
+        val channelId = "memorizer_core"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Memorizer Background", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(channelId, "Memorizer Core", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
 
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
-
-        val notification: Notification = NotificationCompat.Builder(this, channelId)
+        val notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Memorizer Active")
-            .setContentText("Learning in progress...")
+            .setContentText("Next revision scheduled...")
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
 
         startForeground(1, notification)
     }
 
-    private fun playAudioSmart() {
+    private fun playAudioAggressive() {
         if (audioFilePath == null) return
 
-        try {
-            // 1. إعداد خصائص الصوت (Media) ليكون طبيعياً ويتحكم به المستخدم
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA) // عاد إلى وضع الوسائط الطبيعي
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
+        wakeLock?.acquire(60000L) // استيقظ لمدة دقيقة
 
-            // 2. طلب "Ducking" (خفض صوت التطبيقات الأخرى بدلاً من إيقافها)
+        try {
+            // 1. طلب إيقاف الآخرين (PAUSE others) وليس خفض صوتهم فقط
+            // هذا يضمن أن يوتيوب/تيك توك سيتوقفون وتسمع أنت بوضوح
             val focusRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                    .setAudioAttributes(audioAttributes)
-                    .setAcceptsDelayedFocusGain(true)
+                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT) // تغيير هام: حذف Ducking
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
                     .setOnAudioFocusChangeListener(this)
                     .build()
             } else null
 
-            val focusResult = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val res = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 audioManager.requestAudioFocus(focusRequest!!)
             } else {
                 @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             }
 
-            // 3. المنطق: إذا سمح لنا النظام أو سمح لنا بخفض صوت الآخرين -> نشغل
-            if (focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                
+            if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 mediaPlayer?.release()
                 mediaPlayer = MediaPlayer().apply {
                     setDataSource(audioFilePath)
-                    setAudioAttributes(audioAttributes) // استخدام إعدادات الصوت الطبيعية
-                    setVolume(1.0f, 1.0f) // صوت كامل بالنسبة لإعدادات الهاتف الحالية
                     prepare()
                     start()
-                    
                     setOnCompletionListener {
-                        // عند الانتهاء بنجاح، ننتقل للتوقيت التالي
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             audioManager.abandonAudioFocusRequest(focusRequest!!)
                         } else {
                             @Suppress("DEPRECATION")
                             audioManager.abandonAudioFocus(this@MemorizerService)
                         }
-                        scheduleNext(success = true)
+                        scheduleNextAlarm() // جدولة المرة القادمة
                     }
-                    
                     setOnErrorListener { _, _, _ ->
-                        // في حال فشل الملف، لا ننهار، بل نعيد المحاولة قريباً
-                        scheduleNext(success = false)
+                        scheduleNextAlarm()
                         true
                     }
                 }
             } else {
-                // النظام رفض التشغيل (مثلاً مكالمة هاتفية) -> نحاول لاحقاً
-                scheduleNext(success = false)
+                // فشل الحصول على الصوت (مكالمة مثلاً)، نحاول مرة أخرى قريباً
+                scheduleRetry()
             }
         } catch (e: Exception) {
-            // أي خطأ آخر -> نحاول لاحقاً
-            scheduleNext(success = false)
+            scheduleRetry()
         }
     }
 
-    private fun scheduleNext(success: Boolean) {
-        var delay = 10000L // افتراضي 10 ثواني في حالة الفشل
+    private fun scheduleNextAlarm() {
+        // تحديد الوقت القادم
+        val delay = intervals[intervalIndex]
+        
+        // الانتقال للمرحلة التالية (مع الثبات في النهاية)
+        if (intervalIndex < intervals.size - 1) intervalIndex++
 
-        if (success) {
-            // إذا نجحنا، نأخذ التوقيت الطبيعي من القائمة
-            delay = intervals[intervalIndex]
-            // ننتقل للمرحلة التالية، لكن لا نتوقف عند النهاية (نثبت على آخر توقيت)
-            if (intervalIndex < intervals.size - 1) {
-                intervalIndex++
-            }
-        } else {
-            // إذا فشلنا (التطبيق مشغول)، نحاول بعد 10 ثواني فقط
-            delay = 10000L
+        setAlarm(delay)
+    }
+
+    private fun scheduleRetry() {
+        setAlarm(10000L) // المحاولة بعد 10 ثواني
+    }
+
+    private fun setAlarm(delayMs: Long) {
+        val triggerAt = SystemClock.elapsedRealtime() + delayMs
+        
+        val intent = Intent(this, MemorizerService::class.java).apply {
+            action = ACTION_PLAY_NOW
         }
+        val pendingIntent = PendingIntent.getService(
+            this, 
+            999, 
+            intent, 
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
-        handler?.removeCallbacksAndMessages(null)
-        handler?.postDelayed({
-            playAudioSmart()
-        }, delay)
+        // استخدام المنبه الدقيق (يوقظ الهاتف من النوم العميق)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+        } else {
+            alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+        }
+        
+        // نطلق القفل للحفاظ على البطارية حتى الموعد القادم
+        if (wakeLock?.isHeld == true) wakeLock?.release()
     }
 
     override fun onAudioFocusChange(focusChange: Int) {
-        // لا نحتاج لفعل شيء معقد هنا، لأننا طلبنا Ducking
-        // النظام سيقوم بخفض الصوت تلقائياً
+        // إدارة المقاطعات
         if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
-            // إذا فقدنا الصوت تماماً، نوقف المشغل ونعتمد على الجدولة القادمة
-            try {
-                if (mediaPlayer?.isPlaying == true) {
-                    mediaPlayer?.pause()
-                }
-            } catch (e: Exception) {}
+            try { mediaPlayer?.stop() } catch (e: Exception) {}
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            handler?.removeCallbacksAndMessages(null)
-            mediaPlayer?.release()
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (e: Exception) {}
+        // إلغاء المنبهات عند الإيقاف اليدوي
+        val intent = Intent(this, MemorizerService::class.java).apply { action = ACTION_PLAY_NOW }
+        val pendingIntent = PendingIntent.getService(this, 999, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE)
+        if (pendingIntent != null) {
+            alarmManager.cancel(pendingIntent)
+        }
+        mediaPlayer?.release()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
