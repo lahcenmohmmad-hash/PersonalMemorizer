@@ -28,7 +28,6 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Audio Ready: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                // Try anyway even if permission fails
                 val copiedFile = copyFileToCache(uri)
                 if (copiedFile != null) {
                     cachedAudioFile = copiedFile
@@ -44,15 +43,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // طلب إذن المنبه للإصدارات الحديثة
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val alarmManager = getSystemService(android.app.AlarmManager::class.java)
-            if (!alarmManager.canScheduleExactAlarms()) {
-                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
-                startActivity(intent)
-            }
-        }
-
         checkPermissions()
 
         findViewById<Button>(R.id.btnFixBattery).setOnClickListener {
@@ -61,7 +51,7 @@ class MainActivity : AppCompatActivity() {
                 intent.data = Uri.parse("package:$packageName")
                 startActivity(intent)
             } catch (e: Exception) {
-                Toast.makeText(this, "Optimization settings not needed", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Not needed", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -71,12 +61,12 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnStart).setOnClickListener {
             if (cachedAudioFile == null || !cachedAudioFile!!.exists()) {
-                Toast.makeText(this, "Please select audio first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Select audio first!", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             try {
                 val intent = Intent(this, MemorizerService::class.java)
-                intent.action = "ACTION_START" // أمر بدء جديد
+                intent.action = "ACTION_START" // أمر البدء
                 intent.putExtra("filePath", cachedAudioFile!!.absolutePath)
                 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -84,17 +74,18 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     startService(intent)
                 }
-                Toast.makeText(this, "Session Started", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Started!", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
 
+        // --- التعديل هنا: زر التوقف يرسل أمر الانتحار ---
         findViewById<Button>(R.id.btnStop).setOnClickListener {
             val intent = Intent(this, MemorizerService::class.java)
-            intent.action = "ACTION_STOP"
-            startService(intent) // Send stop command
-            Toast.makeText(this, "Session Stopped", Toast.LENGTH_SHORT).show()
+            intent.action = "ACTION_STOP" // الأمر القاتل
+            startService(intent) // نرسل الأمر للخدمة وهي تقتل نفسها
+            Toast.makeText(this, "Stopping...", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -107,7 +98,7 @@ class MainActivity : AppCompatActivity() {
     private fun copyFileToCache(uri: Uri): File? {
         return try {
             val inputStream = contentResolver.openInputStream(uri) ?: return null
-            var fileName = "memorizer_audio.mp3"
+            var fileName = "audio.mp3"
             contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -120,8 +111,6 @@ class MainActivity : AppCompatActivity() {
             inputStream.close()
             outputStream.close()
             file
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 }
