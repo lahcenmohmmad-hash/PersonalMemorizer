@@ -29,60 +29,89 @@ class MemorizerService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    // الفترات الزمنية
     private val intervals = listOf(10000L, 60000L, 300000L, 600000L)
     private var intervalIndex = 0
-
-    // متغير لتحديد هل نحن في وضع الصمت أم التسميع
-    private var isPlayingRealAudio = false
 
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         
-        // قفل المعالج: الإجراء الدفاعي الأول
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:EternalLock")
         wakeLock?.setReferenceCounted(false)
-        wakeLock?.acquire(24 * 60 * 60 * 1000L) // قفل لمدة 24 ساعة
-
-        // تجهيز المسار الصامت (الخديعة الكبرى)
+        
         setupSilentAudio()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action
+
+        // --- استقبال أمر القتل ---
+        if (action == "ACTION_STOP") {
+            killService()
+            return START_NOT_STICKY
+        }
+
         val filePath = intent?.getStringExtra("filePath")
         if (filePath != null) {
+            // تفعيل القفل فقط عند البدء
+            wakeLock?.acquire(24 * 60 * 60 * 1000L)
+            
             audioFilePath = filePath
             intervalIndex = 0
             createNotificationChannel()
             startForeground(1, buildNotification("Started"))
-            
-            // البدء فوراً بالصوت الحقيقي
             playRealAudio()
         }
+        
         return START_STICKY
     }
 
-    // --- 1. تشغيل الملف الصوتي (التسميع) ---
+    // --- دالة الانتحار (Clean Exit) ---
+    private fun killService() {
+        try {
+            // 1. إيقاف العدادات
+            handler.removeCallbacksAndMessages(null)
+            
+            // 2. إيقاف الصوت الحقيقي
+            if (mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.stop()
+            }
+            mediaPlayer?.release()
+            mediaPlayer = null
+
+            // 3. إيقاف الصمت
+            if (silentTrack?.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                silentTrack?.stop()
+            }
+            silentTrack?.release()
+            silentTrack = null
+
+            // 4. تحرير القفل
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+
+            // 5. إزالة الإشعار وقتل الخدمة
+            stopForeground(true)
+            stopSelf()
+            
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun playRealAudio() {
         if (audioFilePath == null) return
-        isPlayingRealAudio = true
         
-        // نوقف الصمت مؤقتاً
         pauseSilentAudio()
-        
-        // تحديث الإشعار
         updateNotification("🔊 Memorizing now...")
 
         try {
-            // طلب إيقاف التطبيقات الأخرى (YouTube, etc.)
             requestFocusCall()
-
             mediaPlayer?.release()
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(audioFilePath)
-                // تصحيح مشكلة الصوت العالي: نستخدم MUSIC ليكون طبيعياً
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -92,7 +121,6 @@ class MemorizerService : Service() {
                 prepare()
                 start()
                 setOnCompletionListener {
-                    // انتهى التسميع -> ننتقل لوضع "الصمت النشط"
                     abandonFocusCall()
                     startWaitingPeriod()
                 }
@@ -106,35 +134,28 @@ class MemorizerService : Service() {
         }
     }
 
-    // --- 2. فترة الانتظار (تشغيل الصمت لإبقاء الهاتف مستيقظاً) ---
     private fun startWaitingPeriod() {
-        isPlayingRealAudio = false
         val delay = intervals[intervalIndex]
         if (intervalIndex < intervals.size - 1) intervalIndex++
 
         updateNotification("⏳ Next in: ${delay / 1000} sec")
+        playSilentAudio() // إبقاء الهاتف مستيقظاً
 
-        // تشغيل الموسيقى الصامتة (هنا يظن الهاتف أننا سبوتيفاي)
-        playSilentAudio()
-
-        // جدولة التشغيل القادم
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({
             playRealAudio()
         }, delay)
     }
 
-    // --- 3. مولد الصمت (AudioTrack) ---
     private fun setupSilentAudio() {
         try {
             val sampleRate = 44100
             val bufferSize = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            
             silentTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC) // نخدع النظام
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                 )
                 .setAudioFormat(
@@ -148,19 +169,15 @@ class MemorizerService : Service() {
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
 
-            // تعبئة البيانات بأصفار (صمت)
             val silentData = ByteArray(bufferSize)
             silentTrack?.write(silentData, 0, silentData.size)
-            // تكرار لانهائي
             silentTrack?.setLoopPoints(0, bufferSize / 2, -1)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) {}
     }
 
     private fun playSilentAudio() {
         try {
-            if (silentTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
+            if (silentTrack?.state == AudioTrack.STATE_INITIALIZED && silentTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
                 silentTrack?.play()
             }
         } catch (e: Exception) {}
@@ -174,10 +191,9 @@ class MemorizerService : Service() {
         } catch (e: Exception) {}
     }
 
-    // --- إدارة التركيز الصوتي (لإيقاف يوتيوب وغيره) ---
     private fun requestFocusCall() {
         val focusRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT) // إيقاف مؤقت للآخرين
+            AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -196,9 +212,7 @@ class MemorizerService : Service() {
     }
 
     private fun abandonFocusCall() {
-        // نترك التركيز ليعود يوتيوب للعمل
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-             // نصنع طلباً فارغاً للإلغاء
              val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).build()
              audioManager.abandonAudioFocusRequest(request)
         } else {
@@ -207,7 +221,6 @@ class MemorizerService : Service() {
         }
     }
 
-    // --- الإشعارات ---
     private fun buildNotification(text: String): Notification {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
@@ -237,10 +250,7 @@ class MemorizerService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        handler.removeCallbacksAndMessages(null)
-        mediaPlayer?.release()
-        silentTrack?.release()
-        wakeLock?.release()
+        killService() // ضمان التنظيف حتى لو تم تدمير الخدمة من النظام
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
