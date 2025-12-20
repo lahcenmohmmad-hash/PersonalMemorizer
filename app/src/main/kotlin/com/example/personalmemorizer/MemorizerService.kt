@@ -1,139 +1,119 @@
 package com.example.personalmemorizer
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
-import android.os.PowerManager
-import androidx.core.app.NotificationCompat
+import android.os.Bundle
+import android.provider.OpenableColumns
+import android.provider.Settings
+import android.widget.Button
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import java.io.File
+import java.io.FileOutputStream
 
-class MemorizerService : Service() {
+class MainActivity : AppCompatActivity() {
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var handler: Handler? = null
-    private var audioUri: Uri? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private lateinit var audioManager: AudioManager
-    
-    // التكرار: 10 ثواني، دقيقة، 5 دقائق، 30 دقيقة
-    private val intervals = listOf(10000L, 60000L, 300000L, 1800000L)
-    private var intervalIndex = 0
+    private var cachedAudioFile: File? = null
 
-    override fun onCreate() {
-        super.onCreate()
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:WakeLock")
-        wakeLock?.acquire(10 * 60 * 60 * 1000L) // 10 hours limit
-        handler = Handler(Looper.getMainLooper())
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val uriString = intent?.getStringExtra("uri")
-        if (uriString != null) {
-            audioUri = Uri.parse(uriString)
-            startForegroundNotification()
-            intervalIndex = 0
-            playAudio()
-        }
-        return START_STICKY
-    }
-
-    private fun startForegroundNotification() {
-        val channelId = "memorizer_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Memorizer", NotificationManager.IMPORTANCE_LOW)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
-
-        val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Memorizer Active")
-            .setContentText("Brainwashing in progress...")
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-
-        startForeground(1, notification)
-    }
-
-    private fun playAudio() {
-        if (audioUri == null) return
-
-        // Audio Ducking (خفض صوت التطبيقات الأخرى)
-        val focusRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .build()
-        } else {
-            null
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioManager.requestAudioFocus(focusRequest!!)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-        }
-
-        mediaPlayer = MediaPlayer().apply {
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .build()
-            )
-            setDataSource(applicationContext, audioUri!!)
-            prepare()
-            start()
-            setOnCompletionListener {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    audioManager.abandonAudioFocusRequest(focusRequest!!)
+    // نستخدم OpenDocument لأنه أكثر توافقاً
+    private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                // الحل الجذري: نسخ الملف إلى ذاكرة التطبيق لتجنب مشاكل الصلاحيات
+                val copiedFile = copyFileToCache(uri)
+                if (copiedFile != null) {
+                    cachedAudioFile = copiedFile
+                    Toast.makeText(this, "Audio Ready: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
                 } else {
-                    @Suppress("DEPRECATION")
-                    audioManager.abandonAudioFocus(null)
+                    Toast.makeText(this, "Failed to copy file", Toast.LENGTH_SHORT).show()
                 }
-                it.release()
-                scheduleNext()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    private fun scheduleNext() {
-        val delay = if (intervalIndex < intervals.size) intervals[intervalIndex] else intervals.last()
-        if (intervalIndex < intervals.size - 1) intervalIndex++
-        
-        handler?.postDelayed({
-            playAudio()
-        }, delay)
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        checkPermissions()
+
+        findViewById<Button>(R.id.btnFixBattery).setOnClickListener {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            } catch (e: Exception) {
+                Toast.makeText(this, "Not supported on this device", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        findViewById<Button>(R.id.btnSelectAudio).setOnClickListener {
+            filePickerLauncher.launch(arrayOf("audio/*"))
+        }
+
+        findViewById<Button>(R.id.btnStart).setOnClickListener {
+            if (cachedAudioFile == null || !cachedAudioFile!!.exists()) {
+                Toast.makeText(this, "Please select an audio file first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            try {
+                val intent = Intent(this, MemorizerService::class.java)
+                // نرسل مسار الملف الداخلي المضمون
+                intent.putExtra("filePath", cachedAudioFile!!.absolutePath)
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+                Toast.makeText(this, "Starting Brainwashing...", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Error starting: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        findViewById<Button>(R.id.btnStop).setOnClickListener {
+            stopService(Intent(this, MemorizerService::class.java))
+            Toast.makeText(this, "Stopped", Toast.LENGTH_SHORT).show()
+        }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        handler?.removeCallbacksAndMessages(null)
-        mediaPlayer?.release()
-        if (wakeLock?.isHeld == true) wakeLock?.release()
+    private fun checkPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+        }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    // دالة لنسخ الملف وتجنب الانهيار
+    private fun copyFileToCache(uri: Uri): File? {
+        return try {
+            val inputStream = contentResolver.openInputStream(uri) ?: return null
+            // الحصول على اسم الملف
+            var fileName = "audio_temp.mp3"
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index != -1) fileName = cursor.getString(index)
+                }
+            }
+            
+            val file = File(cacheDir, fileName)
+            val outputStream = FileOutputStream(file)
+            inputStream.copyTo(outputStream)
+            inputStream.close()
+            outputStream.close()
+            file
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
 }
