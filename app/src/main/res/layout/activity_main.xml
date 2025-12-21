@@ -13,7 +13,7 @@
         android:text="Personal Memorizer"
         android:textSize="24sp"
         android:textStyle="bold"
-        android:layout_marginBottom="40dp"
+        android:layout_marginBottom="30dp"
         android:textColor="#333333"/>
 
     <Button
@@ -23,18 +23,29 @@
         android:text="1. Fix Battery (One Time)"
         android:layout_marginBottom="10dp"/>
 
+    <!-- زر الملف الأول -->
     <Button
-        android:id="@+id/btnSelectAudio"
+        android:id="@+id/btnSelectAudio1"
         android:layout_width="match_parent"
         android:layout_height="60dp"
-        android:text="2. Select Audio File"
+        android:text="2. Select File A (Main)"
         android:layout_marginBottom="10dp"/>
+
+    <!-- زر الملف الثاني (الجديد) -->
+    <Button
+        android:id="@+id/btnSelectAudio2"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="3. Select File B (Optional)"
+        android:backgroundTint="#2196F3"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="20dp"/>
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="60dp"
-        android:text="3. Start Memorizing"
+        android:text="4. Start Memorizing"
         android:backgroundTint="#4CAF50"
         android:textColor="#FFFFFF"
         android:layout_marginBottom="10dp"/>
