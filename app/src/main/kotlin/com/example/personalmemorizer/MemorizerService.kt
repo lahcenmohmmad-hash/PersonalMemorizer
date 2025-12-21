@@ -24,7 +24,14 @@ class MemorizerService : Service() {
 
     private var mediaPlayer: MediaPlayer? = null
     private var silentTrack: AudioTrack? = null
-    private var audioFilePath: String? = null
+    
+    // مسارات الملفات
+    private var path1: String? = null
+    private var path2: String? = null
+    
+    // تحديد الدور (هل هو دور الملف الأول؟)
+    private var isTurnForFirst = true
+
     private lateinit var audioManager: AudioManager
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -35,30 +42,33 @@ class MemorizerService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:EternalLock")
         wakeLock?.setReferenceCounted(false)
-        
         setupSilentAudio()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
 
-        // --- استقبال أمر القتل ---
         if (action == "ACTION_STOP") {
             killService()
             return START_NOT_STICKY
         }
 
-        val filePath = intent?.getStringExtra("filePath")
-        if (filePath != null) {
-            // تفعيل القفل فقط عند البدء
+        // استقبال المسارات
+        val p1 = intent?.getStringExtra("filePath1")
+        val p2 = intent?.getStringExtra("filePath2")
+
+        if (p1 != null) {
             wakeLock?.acquire(24 * 60 * 60 * 1000L)
             
-            audioFilePath = filePath
+            path1 = p1
+            path2 = p2 // قد يكون null إذا لم يختر المستخدم ملفاً ثانياً
+            
+            isTurnForFirst = true // نبدأ دائماً بالأول
             intervalIndex = 0
+            
             createNotificationChannel()
             startForeground(1, buildNotification("Started"))
             playRealAudio()
@@ -67,51 +77,36 @@ class MemorizerService : Service() {
         return START_STICKY
     }
 
-    // --- دالة الانتحار (Clean Exit) ---
     private fun killService() {
         try {
-            // 1. إيقاف العدادات
             handler.removeCallbacksAndMessages(null)
-            
-            // 2. إيقاف الصوت الحقيقي
-            if (mediaPlayer?.isPlaying == true) {
-                mediaPlayer?.stop()
-            }
             mediaPlayer?.release()
             mediaPlayer = null
-
-            // 3. إيقاف الصمت
-            if (silentTrack?.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                silentTrack?.stop()
-            }
             silentTrack?.release()
             silentTrack = null
-
-            // 4. تحرير القفل
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-
-            // 5. إزالة الإشعار وقتل الخدمة
+            if (wakeLock?.isHeld == true) wakeLock?.release()
             stopForeground(true)
             stopSelf()
-            
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     private fun playRealAudio() {
-        if (audioFilePath == null) return
+        // تحديد أي ملف سنشغل: الأول أم الثاني؟
+        // إذا كان الثاني غير موجود، نشغل الأول دائماً
+        val fileToPlay = if (isTurnForFirst || path2 == null) path1 else path2
+        
+        if (fileToPlay == null) return
         
         pauseSilentAudio()
-        updateNotification("🔊 Memorizing now...")
+        
+        val fileName = if (fileToPlay == path1) "File A" else "File B"
+        updateNotification("🔊 Playing: $fileName")
 
         try {
             requestFocusCall()
             mediaPlayer?.release()
             mediaPlayer = MediaPlayer().apply {
-                setDataSource(audioFilePath)
+                setDataSource(fileToPlay)
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -122,6 +117,12 @@ class MemorizerService : Service() {
                 start()
                 setOnCompletionListener {
                     abandonFocusCall()
+                    
+                    // بعد الانتهاء، نعكس الدور للمرة القادمة
+                    if (path2 != null) {
+                        isTurnForFirst = !isTurnForFirst
+                    }
+                    
                     startWaitingPeriod()
                 }
                 setOnErrorListener { _, _, _ ->
@@ -139,7 +140,7 @@ class MemorizerService : Service() {
         if (intervalIndex < intervals.size - 1) intervalIndex++
 
         updateNotification("⏳ Next in: ${delay / 1000} sec")
-        playSilentAudio() // إبقاء الهاتف مستيقظاً
+        playSilentAudio()
 
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({
@@ -250,7 +251,7 @@ class MemorizerService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        killService() // ضمان التنظيف حتى لو تم تدمير الخدمة من النظام
+        killService()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
