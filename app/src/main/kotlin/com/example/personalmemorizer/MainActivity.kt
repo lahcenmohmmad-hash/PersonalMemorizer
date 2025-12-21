@@ -16,23 +16,32 @@ import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
-    private var cachedAudioFile: File? = null
+    private var cachedFile1: File? = null
+    private var cachedFile2: File? = null
+    
+    // متغير لتحديد أي زر تم ضغطه (الأول أم الثاني)
+    private var isSelectingSecondFile = false
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                val copiedFile = copyFileToCache(uri)
+                
+                // حفظ باسم مختلف حسب الزر المضغوط
+                val targetName = if (isSelectingSecondFile) "audio_2.mp3" else "audio_1.mp3"
+                val copiedFile = copyFileToCache(uri, targetName)
+                
                 if (copiedFile != null) {
-                    cachedAudioFile = copiedFile
-                    Toast.makeText(this, "Audio Ready: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
+                    if (isSelectingSecondFile) {
+                        cachedFile2 = copiedFile
+                        Toast.makeText(this, "File B Selected: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        cachedFile1 = copiedFile
+                        Toast.makeText(this, "File A Selected: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
-                val copiedFile = copyFileToCache(uri)
-                if (copiedFile != null) {
-                    cachedAudioFile = copiedFile
-                    Toast.makeText(this, "Audio Ready (Temp)", Toast.LENGTH_SHORT).show()
-                }
+                 Toast.makeText(this, "Error selecting file", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -55,36 +64,48 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        findViewById<Button>(R.id.btnSelectAudio).setOnClickListener {
+        // اختيار الملف الأول
+        findViewById<Button>(R.id.btnSelectAudio1).setOnClickListener {
+            isSelectingSecondFile = false
+            filePickerLauncher.launch(arrayOf("audio/*"))
+        }
+
+        // اختيار الملف الثاني
+        findViewById<Button>(R.id.btnSelectAudio2).setOnClickListener {
+            isSelectingSecondFile = true
             filePickerLauncher.launch(arrayOf("audio/*"))
         }
 
         findViewById<Button>(R.id.btnStart).setOnClickListener {
-            if (cachedAudioFile == null || !cachedAudioFile!!.exists()) {
-                Toast.makeText(this, "Select audio first!", Toast.LENGTH_SHORT).show()
+            if (cachedFile1 == null || !cachedFile1!!.exists()) {
+                Toast.makeText(this, "Select File A at least!", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             try {
                 val intent = Intent(this, MemorizerService::class.java)
-                intent.action = "ACTION_START" // أمر البدء
-                intent.putExtra("filePath", cachedAudioFile!!.absolutePath)
+                intent.action = "ACTION_START"
+                // إرسال المسارين (الثاني قد يكون null وهذا عادي)
+                intent.putExtra("filePath1", cachedFile1!!.absolutePath)
+                if (cachedFile2 != null && cachedFile2!!.exists()) {
+                    intent.putExtra("filePath2", cachedFile2!!.absolutePath)
+                }
                 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(intent)
                 } else {
                     startService(intent)
                 }
-                Toast.makeText(this, "Started!", Toast.LENGTH_SHORT).show()
+                val msg = if (cachedFile2 != null) "Alternating Mode Started!" else "Single Mode Started!"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // --- التعديل هنا: زر التوقف يرسل أمر الانتحار ---
         findViewById<Button>(R.id.btnStop).setOnClickListener {
             val intent = Intent(this, MemorizerService::class.java)
-            intent.action = "ACTION_STOP" // الأمر القاتل
-            startService(intent) // نرسل الأمر للخدمة وهي تقتل نفسها
+            intent.action = "ACTION_STOP"
+            startService(intent)
             Toast.makeText(this, "Stopping...", Toast.LENGTH_SHORT).show()
         }
     }
@@ -95,17 +116,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun copyFileToCache(uri: Uri): File? {
+    private fun copyFileToCache(uri: Uri, targetName: String): File? {
         return try {
             val inputStream = contentResolver.openInputStream(uri) ?: return null
-            var fileName = "audio.mp3"
-            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index != -1) fileName = cursor.getString(index)
-                }
-            }
-            val file = File(cacheDir, fileName)
+            val file = File(cacheDir, targetName)
             val outputStream = FileOutputStream(file)
             inputStream.copyTo(outputStream)
             inputStream.close()
