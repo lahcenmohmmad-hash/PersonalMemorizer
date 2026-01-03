@@ -7,29 +7,35 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.PixelFormat
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import android.media.MediaPlayer
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.WindowManager
+import android.widget.VideoView
 import androidx.core.app.NotificationCompat
+import java.io.File
 
 class MemorizerService : Service() {
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var silentTrack: AudioTrack? = null
+    private var windowManager: WindowManager? = null
+    private var floatingView: View? = null
+    private var videoView: VideoView? = null
     
-    // مسارات الملفات
+    private var silentTrack: AudioTrack? = null
     private var path1: String? = null
     private var path2: String? = null
-    
-    // تحديد الدور (هل هو دور الملف الأول؟)
     private var isTurnForFirst = true
 
     private lateinit var audioManager: AudioManager
@@ -42,96 +48,123 @@ class MemorizerService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:EternalLock")
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Memorizer:VideoLock")
         wakeLock?.setReferenceCounted(false)
+        
         setupSilentAudio()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-
-        if (action == "ACTION_STOP") {
+        if (intent?.action == "ACTION_STOP") {
             killService()
             return START_NOT_STICKY
         }
 
-        // استقبال المسارات
-        val p1 = intent?.getStringExtra("filePath1")
-        val p2 = intent?.getStringExtra("filePath2")
+        if (intent?.action == "ACTION_START") {
+            path1 = intent.getStringExtra("filePath1")
+            path2 = intent.getStringExtra("filePath2")
+            
+            if (path1 != null) {
+                if (!Settings.canDrawOverlays(this)) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
 
-        if (p1 != null) {
-            wakeLock?.acquire(24 * 60 * 60 * 1000L)
-            
-            path1 = p1
-            path2 = p2 // قد يكون null إذا لم يختر المستخدم ملفاً ثانياً
-            
-            isTurnForFirst = true // نبدأ دائماً بالأول
-            intervalIndex = 0
-            
-            createNotificationChannel()
-            startForeground(1, buildNotification("Started"))
-            playRealAudio()
+                wakeLock?.acquire(24 * 60 * 60 * 1000L)
+                intervalIndex = 0
+                isTurnForFirst = true
+                
+                createNotificationChannel()
+                startForeground(1, buildNotification("Video Service Active"))
+                
+                playRealVideo()
+            }
         }
-        
         return START_STICKY
     }
 
-    private fun killService() {
-        try {
-            handler.removeCallbacksAndMessages(null)
-            mediaPlayer?.release()
-            mediaPlayer = null
-            silentTrack?.release()
-            silentTrack = null
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-            stopForeground(true)
-            stopSelf()
-        } catch (e: Exception) { e.printStackTrace() }
-    }
-
-    private fun playRealAudio() {
-        // تحديد أي ملف سنشغل: الأول أم الثاني؟
-        // إذا كان الثاني غير موجود، نشغل الأول دائماً
+    private fun playRealVideo() {
         val fileToPlay = if (isTurnForFirst || path2 == null) path1 else path2
-        
         if (fileToPlay == null) return
-        
+
         pauseSilentAudio()
-        
-        val fileName = if (fileToPlay == path1) "File A" else "File B"
-        updateNotification("🔊 Playing: $fileName")
+        updateNotification("🎬 Playing Video...")
 
         try {
             requestFocusCall()
-            mediaPlayer?.release()
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(fileToPlay)
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                prepare()
-                start()
-                setOnCompletionListener {
-                    abandonFocusCall()
-                    
-                    // بعد الانتهاء، نعكس الدور للمرة القادمة
-                    if (path2 != null) {
-                        isTurnForFirst = !isTurnForFirst
-                    }
-                    
-                    startWaitingPeriod()
-                }
-                setOnErrorListener { _, _, _ ->
-                    startWaitingPeriod()
-                    true
-                }
+
+            // التأكد من أننا ننشئ النافذة في الـ Main Thread
+            handler.post {
+                showFloatingWindow(fileToPlay)
             }
+
         } catch (e: Exception) {
             startWaitingPeriod()
+        }
+    }
+
+    private fun showFloatingWindow(filePath: String) {
+        // إذا كانت النافذة موجودة مسبقاً، نحذفها أولاً
+        removeFloatingWindow()
+
+        // إعداد خصائص النافذة العائمة
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY 
+            else 
+                WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or 
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON, // إبقاء الشاشة مضيئة أثناء الفيديو
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.CENTER
+
+        // نفخ التصميم
+        val inflater = getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
+        floatingView = inflater.inflate(R.layout.layout_floating_video, null)
+        videoView = floatingView?.findViewById(R.id.floatingVideoView)
+
+        videoView?.setVideoPath(filePath)
+        
+        videoView?.setOnPreparedListener { mp ->
+            mp.start()
+        }
+
+        videoView?.setOnCompletionListener {
+            // عند انتهاء الفيديو
+            removeFloatingWindow()
+            abandonFocusCall()
+            
+            if (path2 != null) isTurnForFirst = !isTurnForFirst
+            startWaitingPeriod()
+        }
+
+        videoView?.setOnErrorListener { _, _, _ ->
+            removeFloatingWindow()
+            startWaitingPeriod()
+            true
+        }
+
+        // إضافة النافذة للشاشة
+        try {
+            windowManager?.addView(floatingView, params)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            startWaitingPeriod()
+        }
+    }
+
+    private fun removeFloatingWindow() {
+        if (floatingView != null) {
+            try {
+                windowManager?.removeView(floatingView)
+            } catch (e: Exception) {}
+            floatingView = null
         }
     }
 
@@ -139,15 +172,29 @@ class MemorizerService : Service() {
         val delay = intervals[intervalIndex]
         if (intervalIndex < intervals.size - 1) intervalIndex++
 
-        updateNotification("⏳ Next in: ${delay / 1000} sec")
-        playSilentAudio()
+        updateNotification("⏳ Next video in: ${delay / 1000}s")
+        playSilentAudio() // إبقاء النظام حياً
 
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({
-            playRealAudio()
+            playRealVideo()
         }, delay)
     }
 
+    private fun killService() {
+        try {
+            handler.removeCallbacksAndMessages(null)
+            removeFloatingWindow()
+            silentTrack?.release()
+            silentTrack = null
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            stopForeground(true)
+            stopSelf()
+        } catch (e: Exception) {}
+    }
+
+    // --- بقية الكود (SilentAudio, AudioFocus, Notification) كما هو ---
+    
     private fun setupSilentAudio() {
         try {
             val sampleRate = 44100
@@ -226,8 +273,8 @@ class MemorizerService : Service() {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
 
-        return NotificationCompat.Builder(this, "memorizer_eternal")
-            .setContentTitle("Memorizer Active")
+        return NotificationCompat.Builder(this, "memorizer_video")
+            .setContentTitle("Memorizer Video")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(pendingIntent)
@@ -243,7 +290,7 @@ class MemorizerService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel("memorizer_eternal", "Memorizer Background", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel("memorizer_video", "Memorizer Video Service", NotificationManager.IMPORTANCE_LOW)
             channel.setSound(null, null)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
