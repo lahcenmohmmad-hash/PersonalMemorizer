@@ -18,30 +18,25 @@ class MainActivity : AppCompatActivity() {
 
     private var cachedFile1: File? = null
     private var cachedFile2: File? = null
-    
-    // متغير لتحديد أي زر تم ضغطه (الأول أم الثاني)
     private var isSelectingSecondFile = false
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) { }
                 
-                // حفظ باسم مختلف حسب الزر المضغوط
-                val targetName = if (isSelectingSecondFile) "audio_2.mp3" else "audio_1.mp3"
+                val targetName = if (isSelectingSecondFile) "media_file_2" else "media_file_1"
                 val copiedFile = copyFileToCache(uri, targetName)
                 
                 if (copiedFile != null) {
-                    if (isSelectingSecondFile) {
-                        cachedFile2 = copiedFile
-                        Toast.makeText(this, "File B Selected: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
-                    } else {
-                        cachedFile1 = copiedFile
-                        Toast.makeText(this, "File A Selected: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
-                    }
+                    val msg = if (isSelectingSecondFile) "File B Set" else "File A Set"
+                    Toast.makeText(this, "$msg: ${copiedFile.name}", Toast.LENGTH_SHORT).show()
+                    if (isSelectingSecondFile) cachedFile2 = copiedFile else cachedFile1 = copiedFile
                 }
             } catch (e: Exception) {
-                 Toast.makeText(this, "Error selecting file", Toast.LENGTH_SHORT).show()
+                 Toast.makeText(this, "Error", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -53,60 +48,62 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         checkPermissions()
+        checkOverlayPermission() // التأكد من إذن الفيديو العائم
 
         findViewById<Button>(R.id.btnFixBattery).setOnClickListener {
             try {
                 val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                 intent.data = Uri.parse("package:$packageName")
                 startActivity(intent)
-            } catch (e: Exception) {
-                Toast.makeText(this, "Not needed", Toast.LENGTH_SHORT).show()
-            }
+            } catch (e: Exception) {}
         }
 
-        // اختيار الملف الأول
         findViewById<Button>(R.id.btnSelectAudio1).setOnClickListener {
             isSelectingSecondFile = false
-            filePickerLauncher.launch(arrayOf("audio/*"))
+            filePickerLauncher.launch(arrayOf("video/*", "audio/*")) // نركز على الفيديو
         }
 
-        // اختيار الملف الثاني
         findViewById<Button>(R.id.btnSelectAudio2).setOnClickListener {
             isSelectingSecondFile = true
-            filePickerLauncher.launch(arrayOf("audio/*"))
+            filePickerLauncher.launch(arrayOf("video/*", "audio/*"))
         }
 
         findViewById<Button>(R.id.btnStart).setOnClickListener {
-            if (cachedFile1 == null || !cachedFile1!!.exists()) {
-                Toast.makeText(this, "Select File A at least!", Toast.LENGTH_SHORT).show()
+            if (!Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Please grant Overlay Permission first!", Toast.LENGTH_LONG).show()
+                checkOverlayPermission()
                 return@setOnClickListener
             }
-            try {
-                val intent = Intent(this, MemorizerService::class.java)
-                intent.action = "ACTION_START"
-                // إرسال المسارين (الثاني قد يكون null وهذا عادي)
-                intent.putExtra("filePath1", cachedFile1!!.absolutePath)
-                if (cachedFile2 != null && cachedFile2!!.exists()) {
-                    intent.putExtra("filePath2", cachedFile2!!.absolutePath)
-                }
-                
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-                val msg = if (cachedFile2 != null) "Alternating Mode Started!" else "Single Mode Started!"
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+
+            if (cachedFile1 == null) {
+                Toast.makeText(this, "Select File A!", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
             }
+
+            val intent = Intent(this, MemorizerService::class.java)
+            intent.action = "ACTION_START"
+            intent.putExtra("filePath1", cachedFile1!!.absolutePath)
+            if (cachedFile2 != null) intent.putExtra("filePath2", cachedFile2!!.absolutePath)
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            Toast.makeText(this, "Video Brainwashing Started!", Toast.LENGTH_SHORT).show()
         }
 
         findViewById<Button>(R.id.btnStop).setOnClickListener {
             val intent = Intent(this, MemorizerService::class.java)
             intent.action = "ACTION_STOP"
             startService(intent)
-            Toast.makeText(this, "Stopping...", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun checkOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            startActivity(intent)
         }
     }
 
@@ -116,14 +113,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun copyFileToCache(uri: Uri, targetName: String): File? {
+    private fun copyFileToCache(uri: Uri, baseName: String): File? {
         return try {
-            val inputStream = contentResolver.openInputStream(uri) ?: return null
-            val file = File(cacheDir, targetName)
+            var extension = "mp4" // نفترض أنه فيديو
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index != -1) {
+                        val name = cursor.getString(index)
+                        if (name.contains(".")) extension = name.substringAfterLast(".")
+                    }
+                }
+            }
+            val file = File(cacheDir, "$baseName.$extension")
             val outputStream = FileOutputStream(file)
-            inputStream.copyTo(outputStream)
-            inputStream.close()
-            outputStream.close()
+            contentResolver.openInputStream(uri)?.copyTo(outputStream)
             file
         } catch (e: Exception) { null }
     }
