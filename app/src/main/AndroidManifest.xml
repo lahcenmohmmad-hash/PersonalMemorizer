@@ -7,10 +7,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" /> <!-- إضافة إذن قراءة الفيديو -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    
+    <!-- هذا هو الإذن الجديد للظهور فوق التطبيقات -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -37,10 +39,6 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
-
-        <!-- هذا هو السطر الجديد المهم جداً -->
-        <receiver android:name=".AlarmReceiver" android:exported="false" />
-
     </application>
 
 </manifest>
